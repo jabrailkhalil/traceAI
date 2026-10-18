@@ -25,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 0b8d73caf0f93853bcd61746eaff3ae8727d54c9
+          ref: 208329d3dec4d8c51d5255332e43e479967b6fff
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -81,7 +81,7 @@ jobs:
           before_failed=sum(c.find('failure') is not None for c in before_cases)
           assert source_before.returncode==1 and before_failed>0 and not any(c.find('error') is not None for c in before_cases)
           xml=out/'tests.xml'
-          run('tests',['pytest',test,'python/tests/test_framework_google_adk.py','-q','--tb=short','--junitxml='+str(xml)])
+          run('tests',['pytest','python/tests/test_framework_google_adk.py',test,'-q','--tb=short','--junitxml='+str(xml)])
           cases=ElementTree.parse(xml).findall('.//testcase')
           assert len(cases)==26 and not any(c.find(t) is not None for c in cases for t in ('failure','error','skipped'))
           run('ruff',['ruff','check','--isolated','--select','E4,E7,E9,F',str(source),test])
