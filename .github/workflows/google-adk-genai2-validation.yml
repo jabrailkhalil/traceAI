@@ -25,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ed560970f2665271e899e793c76d72cab350e07e
+          ref: 0b8d73caf0f93853bcd61746eaff3ae8727d54c9
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -66,15 +66,27 @@ jobs:
               assert before.returncode==1 and 'ResolutionImpossible' in before.stderr,(before.returncode,before.stderr[-2000:])
           else:
               assert before.returncode==0
-          run('install',['pip','install',*requirements,'pytest==8.4.2','pytest-asyncio==0.26.0','black==24.10.0','ruff==0.14.1'])
+          run('install',['pip','install',*requirements,'pytest==8.4.2','pytest-asyncio==0.26.0','black==24.10.0','ruff==0.14.1','mypy==1.18.2'])
           run('pip-check',['pip','check'])
           test='python/tests/test_google_adk_genai_compatibility.py'
+          source=Path('python/frameworks/google-adk/traceai_google_adk/__init__.py')
+          fixed_source=source.read_bytes()
+          try:
+              original_source=subprocess.run(['git','show','54421a67c60c2c269df12b56720346ae54336dc8:'+source.as_posix()],capture_output=True,check=True).stdout
+              source.write_bytes(original_source)
+              source_before=run('original-source',['pytest',test,'-q','--tb=short','--junitxml='+str(out/'original-source.xml')],check=False)
+          finally:
+              source.write_bytes(fixed_source)
+          before_cases=ElementTree.parse(out/'original-source.xml').findall('.//testcase')
+          before_failed=sum(c.find('failure') is not None for c in before_cases)
+          assert source_before.returncode==1 and before_failed>0 and not any(c.find('error') is not None for c in before_cases)
           xml=out/'tests.xml'
           run('tests',['pytest',test,'python/tests/test_framework_google_adk.py','-q','--tb=short','--junitxml='+str(xml)])
           cases=ElementTree.parse(xml).findall('.//testcase')
-          assert len(cases)==22 and not any(c.find(t) is not None for c in cases for t in ('failure','error','skipped'))
-          run('ruff',['ruff','check','--isolated','--select','E4,E7,E9,F',test])
-          run('black',['black','--check',test])
+          assert len(cases)==26 and not any(c.find(t) is not None for c in cases for t in ('failure','error','skipped'))
+          run('ruff',['ruff','check','--isolated','--select','E4,E7,E9,F',str(source),test])
+          run('black',['black','--check',str(source),test])
+          run('mypy',['mypy','--config-file',os.devnull,'--follow-imports','silent','--ignore-missing-imports',str(source)])
           run('wheel',['pip','wheel','--no-deps','--wheel-dir',str(out/'wheels'),'python/frameworks/google-adk'])
           subprocess.run(['git','diff','--exit-code'],check=True)
           subprocess.run(['git','diff','--check'],check=True)
@@ -82,7 +94,7 @@ jobs:
           head=subprocess.run(['git','rev-parse','HEAD'],check=True,capture_output=True,text=True).stdout.strip()
           result={'source':head,'adk':version('google-adk'),'genai':version('google-genai'),'python':sys.version,
                   'original_resolution_exit':before.returncode,'fixed_resolution_success':True,'pip_check':True,
-                  'tests':22,'failures':0,'skipped':0,'wheel_built':True,'live_provider_tested':False}
+                  'original_source_failures':before_failed,'tests':26,'failures':0,'skipped':0,'wheel_built':True,'live_provider_tested':False}
           assert result['adk']==adk and result['genai']==genai
           (out/'validated.json').write_text(json.dumps(result,indent=2),encoding='utf-8')
           print(json.dumps(result,indent=2))
