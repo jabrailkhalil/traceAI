@@ -1,0 +1,108 @@
+name: Google ADK stream validation
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: '3.9'
+            adk: '1.2.1'
+          - python: '3.12'
+            adk: '1.32.0'
+          - python: '3.12'
+            adk: '2.1.0'
+    env:
+      EVIDENCE_DIR: ${{ runner.temp }}/adk-stream-evidence
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: c74b88b9b48ac7b5340a530d21a0366d5c96600e
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install real ADK, instrumentation and validation tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install -e python -e python/frameworks/google-adk "google-adk==${{ matrix.adk }}" pytest==8.4.2 pytest-asyncio==0.26.0 black==24.10.0 isort==5.13.2 ruff==0.14.1 mypy==1.18.2
+      - name: Verify regression, actual Runner, formatting and type baseline
+        shell: python
+        run: |
+          import ast
+          import collections
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+          from importlib.metadata import version
+          from pathlib import Path
+          from xml.etree import ElementTree
+          
+          import black
+          
+          out=Path(os.environ['EVIDENCE_DIR'])
+          out.mkdir(parents=True,exist_ok=True)
+          source=Path('python/frameworks/google-adk/traceai_google_adk/_wrappers.py')
+          tests=['python/tests/test_google_adk_stream_lifecycle.py','python/tests/test_google_adk_stream_runner.py']
+          fixed=source.read_bytes()
+          base='54421a67c60c2c269df12b56720346ae54336dc8'
+          original=subprocess.run(['git','show',base+':'+source.as_posix()],capture_output=True,check=True).stdout
+          env={k:v for k,v in os.environ.items() if not any(s in k.upper() for s in ('TOKEN','SECRET','API_KEY','CREDENTIAL'))}
+          env['PYTHONDONTWRITEBYTECODE']='1'
+          def check_tests(label,paths):
+              xml=out/(label+'.xml')
+              p=subprocess.run([sys.executable,'-m','pytest',*paths,'-q','--tb=short','--junitxml='+str(xml)],env=env,capture_output=True,text=True,timeout=180)
+              (out/(label+'.txt')).write_text(p.stdout+p.stderr,encoding='utf-8')
+              cases=ElementTree.parse(xml).findall('.//testcase')
+              return {'exit':p.returncode,'tests':len(cases),'failed':sum(c.find('failure') is not None for c in cases),
+                      'errors':sum(c.find('error') is not None for c in cases),'skipped':sum(c.find('skipped') is not None for c in cases)}
+          def mypy(label):
+              p=subprocess.run([sys.executable,'-m','mypy','--config-file',os.devnull,'--follow-imports','silent','--ignore-missing-imports',str(source)],env=env,capture_output=True,text=True,timeout=180)
+              (out/(label+'-mypy.txt')).write_text(p.stdout+p.stderr,encoding='utf-8')
+              return collections.Counter(re.findall(r'error: (.+)',p.stdout))
+          try:
+              source.write_bytes(original)
+              before=check_tests('original',tests)
+              original_types=mypy('original')
+          finally:
+              source.write_bytes(fixed)
+          assert before['failed']>0 and before['errors']==0,before
+          after=check_tests('fixed',tests+['python/tests/test_framework_google_adk.py'])
+          assert after['exit']==0 and after['skipped']==0,after
+          fixed_types=mypy('fixed')
+          assert not fixed_types-original_types,(original_types,fixed_types)
+          for label,args in [
+              ('ruff',['ruff','check','--isolated','--select','E4,E7,E9,F',str(source),*tests]),
+              ('black-tests',['black','--check',*tests]),
+              ('isort',['isort','--check-only','--profile','black','-p','fi_instrumentation',str(source),*tests]),
+          ]:
+              p=subprocess.run([sys.executable,'-m',*args],env=env,capture_output=True,text=True)
+              (out/(label+'.txt')).write_text(p.stdout+p.stderr,encoding='utf-8')
+              assert p.returncode==0,(label,p.stdout,p.stderr)
+          text=source.read_text()
+          node=next(n for n in ast.parse(text).body if isinstance(n,ast.AsyncFunctionDef) and n.name=='_trace_async_generator')
+          helper='\n'.join(text.splitlines()[node.lineno-1:node.end_lineno])+'\n'
+          assert black.format_str(helper,mode=black.Mode())==helper,'new helper needs Black formatting'
+          subprocess.run(['git','diff','--exit-code'],check=True)
+          subprocess.run(['git','diff','--check'],check=True)
+          head=subprocess.run(['git','rev-parse','HEAD'],check=True,capture_output=True,text=True).stdout.strip()
+          result={'source':head,'original':before,'fixed':after,'python':sys.version,'adk':version('google-adk'),
+                  'genai':version('google-genai'),'otel':version('opentelemetry-sdk'),
+                  'mypy_existing_messages':dict(original_types),'mypy_new_errors':0,'live_provider_tested':False}
+          (out/'validated.json').write_text(json.dumps(result,indent=2),encoding='utf-8')
+          print(json.dumps(result,indent=2))
+      - name: Upload complete evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: adk-stream-${{ matrix.python }}-${{ matrix.adk }}
+          path: ${{ env.EVIDENCE_DIR }}
