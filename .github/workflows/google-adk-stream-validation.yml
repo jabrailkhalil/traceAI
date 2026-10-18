@@ -1,5 +1,7 @@
 name: Google ADK stream validation
 on:
+  push:
+    branches: [validation/adk-stream-20261018]
   workflow_dispatch:
 permissions:
   contents: read
