@@ -19,7 +19,7 @@ jobs:
           - python: '3.12'
             adk: '2.1.0'
     env:
-      EVIDENCE_DIR: ${{ runner.temp }}/adk-stream-evidence
+      EVIDENCE_DIR: /tmp/adk-stream-evidence
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
       - uses: actions/checkout@v4
