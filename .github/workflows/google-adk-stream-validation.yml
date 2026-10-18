@@ -24,7 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 1faa895a4ef407c985eed99cfb360a5c294a2e86
+          ref: 9696d4e43ac0246bd6ef2272c99b754e5dc1d7f9
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -78,7 +78,7 @@ jobs:
           finally:
               source.write_bytes(fixed)
           assert before['failed']>0 and before['errors']==0,before
-          after=check_tests('fixed',tests+['python/tests/test_framework_google_adk.py'])
+          after=check_tests('fixed',['python/tests/test_framework_google_adk.py']+tests)
           assert after['exit']==0 and after['skipped']==0,after
           fixed_types=mypy('fixed')
           assert not fixed_types-original_types,(original_types,fixed_types)
