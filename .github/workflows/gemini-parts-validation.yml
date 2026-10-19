@@ -1,0 +1,98 @@
+name: Gemini streaming parts validation
+on:
+  push:
+    branches: [validation/gemini-parts-20261019]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: '3.10'
+            genai: '1.8.0'
+          - python: '3.12'
+            genai: '1.24.0'
+          - python: '3.12'
+            genai: '1.75.0'
+          - python: '3.12'
+            genai: '2.31.0'
+    env:
+      EVIDENCE_DIR: /tmp/gemini-parts-evidence
+      GENAI_VERSION: ${{ matrix.genai }}
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 4d9f31ae00cf6a3d9e6b92041b0eb7be8f1c1b1f
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Reproduce baseline failure, test fixed streaming and build wheel
+        shell: python
+        run: |
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+          from importlib.metadata import version
+          from xml.etree import ElementTree as ET
+          
+          out = Path(os.environ['EVIDENCE_DIR'])
+          out.mkdir(parents=True, exist_ok=True)
+          sdk = os.environ['GENAI_VERSION']
+          source = Path('python/frameworks/google-genai/traceai_google_genai/_stream.py')
+          tests = 'python/frameworks/google-genai/tests'
+          base = '54421a67c60c2c269df12b56720346ae54336dc8'
+          env = {k: v for k, v in os.environ.items() if not any(s in k.upper() for s in ('TOKEN', 'SECRET', 'API_KEY', 'CREDENTIAL'))}
+          env['PYTHONDONTWRITEBYTECODE'] = '1'
+          
+          def run(label, args, check=True):
+              p = subprocess.run([sys.executable, '-m', *args], env=env, capture_output=True, text=True, timeout=240)
+              (out/(label+'.txt')).write_text(p.stdout+p.stderr, encoding='utf-8')
+              if check:
+                  assert p.returncode == 0, (label, p.returncode, p.stdout[-3500:], p.stderr[-2000:])
+              return p
+          
+          def summary(xml):
+              cases = ET.parse(xml).findall('.//testcase')
+              return {'tests': len(cases), **{tag: sum(c.find(tag) is not None for c in cases) for tag in ('failure', 'error', 'skipped')}}
+          
+          run('install', ['pip', 'install', '-e', 'python', '-e', 'python/frameworks/google-genai', 'google-genai=='+sdk, 'pytest==8.4.2', 'pytest-asyncio==0.26.0', 'black==24.10.0', 'ruff==0.14.1', 'isort==6.1.0', 'mypy==1.18.2'])
+          run('pip-check', ['pip', 'check'])
+          fixed = source.read_bytes()
+          original = subprocess.run(['git', 'show', base+':'+source.as_posix()], capture_output=True, check=True).stdout
+          try:
+              source.write_bytes(original)
+              before = run('original', ['pytest', tests, '-q', '--tb=short', '--junitxml='+str(out/'original.xml')], check=False)
+          finally:
+              source.write_bytes(fixed)
+          original_counts = summary(out/'original.xml')
+          assert before.returncode == 1 and original_counts['failure'] >= 14 and original_counts['error'] == 0, original_counts
+          run('fixed', ['pytest', tests, '-q', '--tb=short', '--junitxml='+str(out/'fixed.xml')])
+          fixed_counts = summary(out/'fixed.xml')
+          expected_skips = 2 if sdk == '1.8.0' else 0
+          assert fixed_counts == {'tests': 20, 'failure': 0, 'error': 0, 'skipped': expected_skips}, fixed_counts
+          run('ruff', ['ruff', 'check', '--isolated', '--select', 'E4,E7,E9,F', str(source), tests])
+          run('black', ['black', '--check', tests])
+          run('isort', ['isort', '--check-only', '--profile', 'black', tests])
+          run('mypy', ['mypy', '--config-file', os.devnull, '--follow-imports', 'silent', '--ignore-missing-imports', str(source)])
+          run('wheel', ['pip', 'wheel', '--no-deps', '--wheel-dir', str(out/'wheels'), 'python/frameworks/google-genai'])
+          subprocess.run(['git', 'diff', '--exit-code'], check=True)
+          subprocess.run(['git', 'diff', '--check'], check=True)
+          head = subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True, text=True, check=True).stdout.strip()
+          result = {'source': head, 'python': sys.version, 'genai': version('google-genai'), 'original': original_counts, 'fixed': fixed_counts, 'wheel_built': True, 'live_provider_tested': False}
+          assert result['genai'] == sdk
+          (out/'validated.json').write_text(json.dumps(result, indent=2), encoding='utf-8')
+          print(json.dumps(result, indent=2))
+      - name: Upload complete evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-${{ matrix.python }}-genai-${{ matrix.genai }}
+          path: ${{ env.EVIDENCE_DIR }}
