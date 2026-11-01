@@ -24,9 +24,9 @@ jobs:
       GENAI_VERSION: ${{ matrix.genai }}
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 4d9f31ae00cf6a3d9e6b92041b0eb7be8f1c1b1f
+          ref: c28d7d9711b3448ee10308232dc3e29de92073f2
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -48,7 +48,7 @@ jobs:
           sdk = os.environ['GENAI_VERSION']
           source = Path('python/frameworks/google-genai/traceai_google_genai/_stream.py')
           tests = 'python/frameworks/google-genai/tests'
-          base = '54421a67c60c2c269df12b56720346ae54336dc8'
+          base = '979c271632004b9ac55435244c4154995c4fcdb4'
           env = {k: v for k, v in os.environ.items() if not any(s in k.upper() for s in ('TOKEN', 'SECRET', 'API_KEY', 'CREDENTIAL'))}
           env['PYTHONDONTWRITEBYTECODE'] = '1'
           
