@@ -1,0 +1,61 @@
+name: Author n8n release and package validation
+on:
+  push:
+    branches: [validation/n8n-nov4-candidate]
+    paths: [.github/workflows/author-n8n-nov4.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 9b31b1872e38e040eb27114f5668f6e563f79dd6
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.21.1'
+          cache: pnpm
+          cache-dependency-path: typescript/pnpm-lock.yaml
+      - name: Release tooling unit tests and read-only inventory
+        run: |
+          python3 -m unittest discover -s .github/release -p 'test_*.py'
+          python3 .github/release/release_plan.py --check
+          python3 .github/release/release_plan.py --offline > "$RUNNER_TEMP/release-plan.json"
+      - name: Build locked package and dependencies
+        working-directory: typescript
+        run: |
+          pnpm --filter '@traceai/n8n...' install --frozen-lockfile --ignore-scripts
+          pnpm run build:deps
+          pnpm --filter @traceai/n8n build
+          pnpm --filter @traceai/n8n typecheck
+          pnpm --filter @traceai/n8n lint
+          pnpm --filter @traceai/n8n test:coverage
+      - name: Pack packages and check isolated CommonJS and ESM imports
+        working-directory: typescript
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/packed" "$RUNNER_TEMP/consumer"
+          for p in @traceai/fi-semantic-conventions @traceai/fi-core @traceai/n8n; do
+            pnpm --filter "$p" pack --pack-destination "$RUNNER_TEMP/packed"
+          done
+          cd "$RUNNER_TEMP/consumer"
+          npm init -y
+          npm install --ignore-scripts --no-audit --no-fund "$RUNNER_TEMP/packed/"*.tgz
+          npm ls --all > "$RUNNER_TEMP/consumer-tree.txt"
+          node -e 'const assert=require("node:assert/strict"); assert.throws(()=>require.resolve("n8n-core"),{code:"MODULE_NOT_FOUND"}); const {N8nInstrumentation}=require("@traceai/n8n"); const i=new N8nInstrumentation(); i.disable();'
+          node --input-type=module -e 'import {N8nInstrumentation} from "@traceai/n8n"; const i=new N8nInstrumentation(); i.disable();'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: n8n-nov4-release-and-package
+          path: |
+            ${{ runner.temp }}/release-plan.json
+            ${{ runner.temp }}/consumer-tree.txt
+            ${{ runner.temp }}/packed/*.tgz
