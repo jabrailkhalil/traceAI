@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 8f3f81dcab7b97b901609ea021c54808289c62a9
+          ref: 8b71d74b7876108e14862cbc3b1fc07de756bf5d
           persist-credentials: false
       - uses: pnpm/action-setup@v4
         with:
