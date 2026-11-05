@@ -1,0 +1,63 @@
+name: Author Hosting current-base comparison
+on:
+  workflow_dispatch:
+  push:
+    branches: [validation/hosting-nov5]
+permissions:
+  contents: read
+env:
+  CI: true
+  NO_COLOR: true
+jobs:
+  test:
+    name: Linux Node${{ matrix.node }} ${{ matrix.source }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22', '24']
+        source: [head, base]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: jabrailkhalil/firebase-tools
+          ref: ${{ matrix.source == 'base' && 'a1d78e7dbb4e97334e042f8a7d4f0ea205c09794' || '8c6b4eee626f3a3662da7ced9f4e75a80e83cba4' }}
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: npm-shrinkwrap.json
+      - run: npm ci
+      - name: Full existing lint, compile, and unit suite
+        run: npm test -- -- --forbid-only
+      - name: Production build and CLI smoke
+        run: |
+          npm run build
+          node lib/bin/firebase.js --version
+      - name: Negative control and restored Hosting suite
+        if: matrix.source == 'head'
+        env:
+          BASE: a1d78e7dbb4e97334e042f8a7d4f0ea205c09794
+        run: |
+          set -euo pipefail
+          cp src/serve/hosting.ts "$RUNNER_TEMP/patched-hosting.ts"
+          restore() { cp "$RUNNER_TEMP/patched-hosting.ts" src/serve/hosting.ts; }
+          trap restore EXIT
+          git show "$BASE:src/serve/hosting.ts" > src/serve/hosting.ts
+          set +e
+          npx --no-install mocha src/serve/hosting.spec.ts --forbid-only --reporter json > "$RUNNER_TEMP/negative.json"
+          result=$?
+          set -e
+          test "$result" -eq 3
+          node -e 'const r=require(process.argv[1]); const want=["hosting stop should stop every hosting site","hosting stop should wait for every server before reporting a shutdown failure","hosting stop should close both real HTTP listeners after serving multiple sites"].sort(); const got=r.failures.map(x=>x.fullTitle).sort(); require("assert").deepStrictEqual(got,want); require("assert").strictEqual(r.stats.passes,9);' "$RUNNER_TEMP/negative.json"
+          restore
+          npx --no-install mocha src/serve/hosting.spec.ts --forbid-only
+          git diff --exit-code HEAD -- src/serve/hosting.ts src/serve/hosting.spec.ts
+      - uses: actions/upload-artifact@v4
+        if: always() && matrix.source == 'head'
+        with:
+          name: hosting-negative-node${{ matrix.node }}
+          path: ${{ runner.temp }}/negative.json
