@@ -1,0 +1,74 @@
+name: Verify Portainer release-base integration
+on:
+  push:
+    branches: [validation/portainer-nov10]
+permissions:
+  contents: read
+jobs:
+  docker-proxy:
+    name: Docker proxy ${{ matrix.source }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        source: [head, base]
+    env:
+      BASE: 72a6e99d70842c07e4a850cd9379b66d54320673
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.source == 'base' && 'portainer/portainer' || 'jabrailkhalil/portainer' }}
+          ref: ${{ matrix.source == 'base' && '72a6e99d70842c07e4a850cd9379b66d54320673' || '4f4dc0329b13218581f248783b41e4be1c8b0a24' }}
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Verify source and full proxy factory tests
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD | tee "$RUNNER_TEMP/source.txt"
+          go version | tee -a "$RUNNER_TEMP/source.txt"
+          go test -json ./api/http/proxy/factory/... > "$RUNNER_TEMP/tests.jsonl"
+      - name: Check changed source formatting
+        if: matrix.source == 'head'
+        run: |
+          set -euo pipefail
+          files=(api/http/proxy/factory/docker/{containers,containers_test,transport,transport_test,volumes,volumes_test}.go)
+          test -z "$(gofmt -l "${files[@]}")"
+      - name: Main production rollback and restored creation regressions
+        if: matrix.source == 'head'
+        run: |
+          set -euo pipefail
+          files=(api/http/proxy/factory/docker/{containers,transport,volumes}.go)
+          mkdir -p "$RUNNER_TEMP/production"
+          for f in "${files[@]}"; do cp "$f" "$RUNNER_TEMP/production/$(basename "$f")"; done
+          restore() { for f in "${files[@]}"; do cp "$RUNNER_TEMP/production/$(basename "$f")" "$f"; done; }
+          trap restore EXIT
+          for f in "${files[@]}"; do git show "$BASE:$f" > "$f"; done
+          selected='^(TestDecorateContainerCreationOperation_BindMounts|TestTransport_proxyNetworkRequest|TestDecorateVolumeResourceCreationOperation_BindDriverOptAllowedForAdmin|TestDecorateVolumeResourceCreationOperation_BindDriverOptAllowedWhenSettingPermissive)$'
+          set +e
+          go test -json ./api/http/proxy/factory/docker -run "$selected" > "$RUNNER_TEMP/negative.jsonl"
+          result=$?
+          set -e
+          test "$result" -eq 1
+          python - <<'PY'
+          import json,os
+          from pathlib import Path
+          rows=[json.loads(l) for l in (Path(os.environ['RUNNER_TEMP'])/'negative.jsonl').read_text().splitlines()]
+          want={'TestDecorateContainerCreationOperation_BindMounts','TestTransport_proxyNetworkRequest','TestDecorateVolumeResourceCreationOperation_BindDriverOptAllowedForAdmin','TestDecorateVolumeResourceCreationOperation_BindDriverOptAllowedWhenSettingPermissive'}
+          got={r['Test'] for r in rows if r.get('Test') and r['Action']=='fail'}
+          assert got==want,(got,want)
+          assert not any('panic:' in r.get('Output','') for r in rows)
+          PY
+          restore
+          go test -json ./api/http/proxy/factory/docker -run "$selected" > "$RUNNER_TEMP/restored.jsonl"
+          git diff --exit-code HEAD -- .
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: portainer-${{ matrix.source }}
+          path: |
+            ${{ runner.temp }}/source.txt
+            ${{ runner.temp }}/*.jsonl
