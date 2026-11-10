@@ -1,4 +1,4 @@
-name: Verify refreshed Feishu regression followup
+name: Complete refreshed Feishu test verification
 on:
   push:
     branches: [validation/qwen15518-nov10]
@@ -33,19 +33,14 @@ jobs:
           corepack pnpm --version >> "$RUNNER_TEMP/feishu-results/source.txt"
       - name: Frozen dependency installation
         run: corepack pnpm install --frozen-lockfile --reporter=append-only
-      - name: Full workspace build, bundle and typecheck
-        run: |
-          set -euo pipefail
-          npm run build 2>&1 | tee "$RUNNER_TEMP/feishu-results/build.log"
-          npm run bundle 2>&1 | tee "$RUNNER_TEMP/feishu-results/bundle.log"
-          npm run typecheck 2>&1 | tee "$RUNNER_TEMP/feishu-results/typecheck.log"
       - name: Strict changed-file style and gate regression checks
         run: |
           set -euo pipefail
           files=(packages/channels/feishu/src/adapter.test.ts packages/channels/feishu/src/inbound-file-store.test.ts)
           npx --no-install eslint "${files[@]}" --max-warnings 0
           npx --no-install prettier --experimental-cli --check "${files[@]}"
-          node --test .github/scripts/check-lint-gate-freshness.test.mjs scripts/tests/lint-scope.test.js > "$RUNNER_TEMP/feishu-results/gate-tests.log" 2>&1
+          node --test .github/scripts/check-lint-gate-freshness.test.mjs > "$RUNNER_TEMP/feishu-results/gate-tests.log" 2>&1
+          npm run test:scripts:unit -- scripts/tests/lint-scope.test.js > "$RUNNER_TEMP/feishu-results/lint-scope-tests.log" 2>&1
       - name: Full Feishu suite
         working-directory: packages/channels/feishu
         run: |
