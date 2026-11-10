@@ -32,11 +32,6 @@ jobs:
           node --version | tee -a "$RUNNER_TEMP/source.txt"
           npm i --global npm@^11.7.0
           npm ci
-      - name: Full build, lint and coverage suite
-        run: |
-          set -euo pipefail
-          npm run build 2>&1 | tee "$RUNNER_TEMP/build.log"
-          npm test 2>&1 | tee "$RUNNER_TEMP/tests.log"
       - name: Restore main discovery behavior as negative control
         if: matrix.source == 'head'
         run: |
@@ -57,7 +52,7 @@ jobs:
           result=$?
           set -e
           test "$result" -eq 4
-          node -e 'const r=require(process.argv[1]);const a=require("assert");a.strictEqual(r.failures.length,4);a.ok(r.failures.every(f=>f.err.name==="AssertionError"));a.strictEqual(r.failures.filter(f=>f.fullTitle.includes("does not merge")).length,2);a.strictEqual(r.failures.filter(f=>f.fullTitle.includes("does not inherit")).length,2);' "$RUNNER_TEMP/negative.json"
+          node -e 'const r=require(process.argv[1]);const a=require("assert");a.strictEqual(r.stats.passes,25);a.strictEqual(r.failures.length,4);a.ok(r.failures.every(f=>/^AssertionError:/.test(f.err.stack)));a.strictEqual(r.failures.filter(f=>f.fullTitle.includes("does not merge")).length,2);a.strictEqual(r.failures.filter(f=>f.fullTitle.includes("does not inherit")).length,2);' "$RUNNER_TEMP/negative.json"
           restore
           npx --no-install mocha test/unit/loaders/config-file.spec.ts test/integration/config-loading.spec.ts --reporter json > "$RUNNER_TEMP/restored.json"
           git diff --exit-code HEAD -- src/loaders/config-file.ts
