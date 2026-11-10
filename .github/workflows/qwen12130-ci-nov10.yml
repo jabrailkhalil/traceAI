@@ -1,0 +1,52 @@
+name: Diagnose Qwen Android PR unit failures
+on:
+  push:
+    branches: [validation/qwen12130-ci-nov10]
+permissions:
+  contents: read
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CI: 'true'
+      QWEN_SKIP_PREPARE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: jabrailkhalil/qwen-code
+          ref: 2b7115db7f41d7400537cc065f9439d990f9caff
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+      - name: Fetch exact main and compare relevant source
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ci-comparison"
+          git fetch --no-tags --depth=1 https://github.com/QwenLM/qwen-code.git 449b71c7b7bceceafe9052bac347fe6ffbd692dd
+          git diff --exit-code HEAD 449b71c7b7bceceafe9052bac347fe6ffbd692dd -- integrations/external-context scripts/verify-capture.mjs scripts/tests/verify-capture.test.js scripts/tests/vitest.config.ts scripts/tests/test-setup.ts pnpm-lock.yaml package.json
+          git rev-parse HEAD > "$RUNNER_TEMP/ci-comparison/source.txt"
+          node --version >> "$RUNNER_TEMP/ci-comparison/source.txt"
+          corepack pnpm --version >> "$RUNNER_TEMP/ci-comparison/source.txt"
+          node -e 'console.log(JSON.stringify(Object.fromEntries(["http_proxy","https_proxy","HTTP_PROXY","HTTPS_PROXY"].map(k=>[k,Boolean(process.env[k])]))))' >> "$RUNNER_TEMP/ci-comparison/source.txt"
+      - name: Frozen dependency installation
+        run: corepack pnpm install --frozen-lockfile --reporter=append-only
+      - name: Compare exact main and PR without changing assertions
+        run: |
+          set -euo pipefail
+          result_dir="$RUNNER_TEMP/ci-comparison"
+          for arm in main head; do
+            if [ "$arm" = main ]; then sha=449b71c7b7bceceafe9052bac347fe6ffbd692dd; else sha=2b7115db7f41d7400537cc065f9439d990f9caff; fi
+            git checkout --detach "$sha"
+            git rev-parse HEAD >> "$result_dir/source.txt"
+            npm -w integrations/external-context run test:ci -- src/proxy.test.ts --reporter=json --outputFile="$result_dir/$arm-proxy.json" > "$result_dir/$arm-proxy.log" 2>&1
+            npm run test:scripts:unit -- scripts/tests/verify-capture.test.js --reporter=json --outputFile="$result_dir/$arm-capture.json" > "$result_dir/$arm-capture.log" 2>&1
+            git diff --exit-code HEAD -- .
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qwen12130-ci-comparison
+          path: ${{ runner.temp }}/ci-comparison
