@@ -1,0 +1,105 @@
+name: Diagnose Feishu followup runner failures
+on:
+  push:
+    branches: [validation/qwen15518-runner-nov10]
+permissions:
+  contents: read
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CI: 'true'
+      QWEN_SKIP_PREPARE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: jabrailkhalil/qwen-code
+          ref: 4e79427e63cab1cf12b3f42cd56527c2467a2222
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+      - name: Exact baseline and unchanged diagnostic paths
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/runner-comparison"
+          git rev-parse HEAD > "$RUNNER_TEMP/runner-comparison/source.txt"
+          git diff --exit-code HEAD 449b71c7b7bceceafe9052bac347fe6ffbd692dd -- scripts integrations packages/cli pnpm-lock.yaml package.json
+          node --version >> "$RUNNER_TEMP/runner-comparison/source.txt"
+          corepack pnpm --version >> "$RUNNER_TEMP/runner-comparison/source.txt"
+      - name: Frozen install and required normal workspace build
+        run: |
+          set -euo pipefail
+          corepack pnpm install --frozen-lockfile --reporter=append-only
+          npm run build > "$RUNNER_TEMP/runner-comparison/build.log" 2>&1
+      - name: Isolated runner-condition image
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/runner-image"
+          cat > "$RUNNER_TEMP/runner-image/Dockerfile" <<'DOCKER'
+          FROM node:22-bookworm
+          ARG DIAGNOSTIC_UID=1001
+          ARG DIAGNOSTIC_GID=1001
+          RUN rm -f /etc/machine-id
+          USER ${DIAGNOSTIC_UID}:${DIAGNOSTIC_GID}
+          ENV HOME=/tmp/qwen-runner-diagnostic-home
+          WORKDIR /workspace
+          DOCKER
+          docker build --build-arg DIAGNOSTIC_UID="$(id -u)" --build-arg DIAGNOSTIC_GID="$(id -g)" -t "qwen-runner-diagnostic:$GITHUB_RUN_ID" "$RUNNER_TEMP/runner-image" > "$RUNNER_TEMP/runner-comparison/image.log" 2>&1
+      - name: Exact main and head under host and controlled container conditions
+        run: |
+          set -euo pipefail
+          result_dir="$RUNNER_TEMP/runner-comparison"
+          for arm in main head; do
+            if [ "$arm" = main ]; then sha=449b71c7b7bceceafe9052bac347fe6ffbd692dd; else sha=4e79427e63cab1cf12b3f42cd56527c2467a2222; fi
+            git checkout --detach "$sha"
+            git rev-parse HEAD >> "$result_dir/source.txt"
+            npm run test:scripts:unit -- scripts/tests/verify-pr-prepare.test.js --reporter=json --outputFile="$result_dir/$arm-host-prepare.json" > "$result_dir/$arm-host-prepare.log" 2>&1
+            (cd packages/cli && npx --no-install vitest run src/serve/managed-workspace-upload.test.ts --reporter=json --outputFile="$result_dir/$arm-host-upload.json") > "$result_dir/$arm-host-upload.log" 2>&1
+            docker run --rm --env CI=true --env ARM="$arm" --volume "$PWD:/workspace" --volume "$result_dir:/results" "qwen-runner-diagnostic:$GITHUB_RUN_ID" bash -c '
+              set -euo pipefail
+              mkdir -p "$HOME"
+              test -e /.dockerenv
+              test ! -e /etc/machine-id
+              node --version > "/results/$ARM-container-environment.txt"
+              corepack pnpm --version >> "/results/$ARM-container-environment.txt"
+              set +e
+              npm run test:scripts:unit -- scripts/tests/verify-pr-prepare.test.js --reporter=json --outputFile="/results/$ARM-container-prepare.json" > "/results/$ARM-container-prepare.log" 2>&1
+              prepare_exit=$?
+              (cd packages/cli && npx --no-install vitest run src/serve/managed-workspace-upload.test.ts -t "returns private terminal receipts after registered SSH storage changes while fencing new filesystem access" --reporter=json --outputFile="/results/$ARM-container-upload.json") > "/results/$ARM-container-upload.log" 2>&1
+              upload_exit=$?
+              set -e
+              test "$prepare_exit" -eq 1
+              test "$upload_exit" -eq 1
+            '
+            git diff --exit-code HEAD -- .
+          done
+          node --input-type=module - "$result_dir" <<'JS'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          import assert from 'node:assert/strict';
+          const dir=process.argv[2];
+          for (const arm of ['main','head']) {
+            for (const [suite,count] of [['prepare',37],['upload',26]]) {
+              const d=JSON.parse(fs.readFileSync(path.join(dir,`${arm}-host-${suite}.json`),'utf8'));
+              assert.equal(d.numPassedTests,count);assert.equal(d.numFailedTests,0);assert.equal(d.numPendingTests,0);
+            }
+            const prep=JSON.parse(fs.readFileSync(path.join(dir,`${arm}-container-prepare.json`),'utf8'));
+            assert.equal(prep.numPassedTests,36);assert.equal(prep.numFailedTests,1);assert.equal(prep.numPendingTests,0);
+            const pf=prep.testResults.flatMap(r=>r.assertionResults).filter(t=>t.status==='failed');
+            assert.equal(pf.length,1);assert.ok(pf[0].fullName.includes('resolves the coordinates and reports a container boundary'));
+            assert.ok(pf[0].failureMessages.some(m=>m.includes('SANDBOX=docker')));
+            const up=JSON.parse(fs.readFileSync(path.join(dir,`${arm}-container-upload.json`),'utf8'));
+            assert.equal(up.numFailedTests,1);assert.equal(up.numPassedTests,0);
+            const uf=up.testResults.flatMap(r=>r.assertionResults).filter(t=>t.status==='failed');
+            assert.equal(uf.length,1);assert.ok(uf[0].fullName.includes('returns private terminal receipts after registered SSH storage changes'));
+            assert.ok(uf[0].failureMessages.some(m=>m.includes('ENOENT')&&m.includes('/etc/machine-id')));
+          }
+          JS
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: feishu-runner-condition-comparison
+          path: ${{ runner.temp }}/runner-comparison
