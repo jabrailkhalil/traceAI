@@ -1,0 +1,176 @@
+name: Verify November 10 Google followups
+on:
+  push:
+    branches: [validation/google-followups-nov10]
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  CI: true
+  NO_COLOR: true
+jobs:
+  hosting:
+    name: Hosting Node${{ matrix.node }} ${{ matrix.source }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22', '24']
+        source: [head, base]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.source == 'base' && 'firebase/firebase-tools' || 'jabrailkhalil/firebase-tools' }}
+          ref: ${{ matrix.source == 'base' && '4a2fc3a71dabcefe9624fae5b5627c078188e70f' || '08423ed3b1277ef5383e2966c586b7b76477e976' }}
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: npm-shrinkwrap.json
+      - run: |
+          git rev-parse HEAD | tee "$RUNNER_TEMP/source.txt"
+          node --version | tee -a "$RUNNER_TEMP/source.txt"
+          npm ci
+      - name: Full existing lint, compile and unit suite
+        run: |
+          set -euo pipefail
+          npm test -- -- --forbid-only 2>&1 | tee "$RUNNER_TEMP/tests.log"
+          npm run build 2>&1 | tee "$RUNNER_TEMP/build.log"
+          node lib/bin/firebase.js --version
+      - name: Negative control and restored Hosting suite
+        if: matrix.source == 'head'
+        run: |
+          set -euo pipefail
+          cp src/serve/hosting.ts "$RUNNER_TEMP/patched-hosting.ts"
+          restore() { cp "$RUNNER_TEMP/patched-hosting.ts" src/serve/hosting.ts; }
+          trap restore EXIT
+          git show 4a2fc3a71dabcefe9624fae5b5627c078188e70f:src/serve/hosting.ts > src/serve/hosting.ts
+          set +e
+          npx --no-install mocha src/serve/hosting.spec.ts --forbid-only --reporter json > "$RUNNER_TEMP/negative.json"
+          result=$?
+          set -e
+          test "$result" -eq 3
+          node -e 'const r=require(process.argv[1]);const a=require("assert");const want=["hosting stop should stop every hosting site","hosting stop should wait for every server before reporting a shutdown failure","hosting stop should close both real HTTP listeners after serving multiple sites"].sort();a.deepStrictEqual(r.failures.map(x=>x.fullTitle).sort(),want);a.strictEqual(r.stats.passes,9);' "$RUNNER_TEMP/negative.json"
+          restore
+          npx --no-install mocha src/serve/hosting.spec.ts --forbid-only --reporter json > "$RUNNER_TEMP/restored.json"
+          git diff --exit-code HEAD -- src/serve/hosting.ts src/serve/hosting.spec.ts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hosting-${{ matrix.source }}-node${{ matrix.node }}
+          path: |
+            ${{ runner.temp }}/source.txt
+            ${{ runner.temp }}/*.log
+            ${{ runner.temp }}/*.json
+  superstatic:
+    name: Superstatic Node${{ matrix.node }} ${{ matrix.source }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22', '24', '26']
+        source: [head, base]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.source == 'base' && 'firebase/superstatic' || 'jabrailkhalil/superstatic' }}
+          ref: ${{ matrix.source == 'base' && '1f9c60dc478049d4b728e9b96423de61f044310f' || '65f61ff9284068e10ffcae3273f00198c9d938e6' }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: |
+          git rev-parse HEAD | tee "$RUNNER_TEMP/source.txt"
+          node --version | tee -a "$RUNNER_TEMP/source.txt"
+          npm i --global npm@^11.7.0
+          npm ci
+      - name: Full build, lint and coverage suite
+        run: |
+          set -euo pipefail
+          npm run build 2>&1 | tee "$RUNNER_TEMP/build.log"
+          npm test 2>&1 | tee "$RUNNER_TEMP/tests.log"
+      - name: Restore main discovery behavior as negative control
+        if: matrix.source == 'head'
+        run: |
+          set -euo pipefail
+          cp src/loaders/config-file.ts "$RUNNER_TEMP/patched-config-file.ts"
+          restore() { cp "$RUNNER_TEMP/patched-config-file.ts" src/loaders/config-file.ts; }
+          trap restore EXIT
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('src/loaders/config-file.ts')
+          s=p.read_text()
+          anchor='autoConfig ? CONFIG_FILE : []'
+          assert s.count(anchor)==1
+          p.write_text(s.replace(anchor,'CONFIG_FILE'))
+          PY
+          set +e
+          npx --no-install mocha test/unit/loaders/config-file.spec.ts test/integration/config-loading.spec.ts --reporter json > "$RUNNER_TEMP/negative.json"
+          result=$?
+          set -e
+          test "$result" -eq 4
+          node -e 'const r=require(process.argv[1]);const a=require("assert");a.strictEqual(r.failures.length,4);a.ok(r.failures.every(f=>f.err.name==="AssertionError"));a.strictEqual(r.failures.filter(f=>f.fullTitle.includes("does not merge")).length,2);a.strictEqual(r.failures.filter(f=>f.fullTitle.includes("does not inherit")).length,2);' "$RUNNER_TEMP/negative.json"
+          restore
+          npx --no-install mocha test/unit/loaders/config-file.spec.ts test/integration/config-loading.spec.ts --reporter json > "$RUNNER_TEMP/restored.json"
+          git diff --exit-code HEAD -- src/loaders/config-file.ts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: superstatic-${{ matrix.source }}-node${{ matrix.node }}
+          path: |
+            ${{ runner.temp }}/source.txt
+            ${{ runner.temp }}/*.log
+            ${{ runner.temp }}/*.json
+  docs:
+    name: ADK Docs ${{ matrix.source }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        source: [head, base]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.source == 'base' && 'google/adk-docs' || 'jabrailkhalil/adk-docs' }}
+          ref: ${{ matrix.source == 'base' && 'ba6f5f826749b57b828de50ebea7513e564b04ba' || 'e7a0b774bfef6a15f3c974822fdf861feb305d57' }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: |
+          git rev-parse HEAD | tee "$RUNNER_TEMP/source.txt"
+          python -m pip install -r requirements.txt
+      - name: Full strict documentation build
+        run: |
+          set -euo pipefail
+          python -m mkdocs build --strict --site-dir "$RUNNER_TEMP/site" 2>&1 | tee "$RUNNER_TEMP/build.log"
+      - name: Inspect rendered Go environment guide
+        if: matrix.source == 'head'
+        run: |
+          python - <<'PY'
+          import json,os
+          from pathlib import Path
+          from bs4 import BeautifulSoup
+          root=Path(os.environ['RUNNER_TEMP'])
+          soup=BeautifulSoup((root/'site/deploy/agent-runtime/deploy/index.html').read_text(),'html.parser')
+          text=''.join(soup.get_text().split())
+          phrases=['--env=NUM_WORKERS=2','--default_env=false','[a-zA-Z_][a-zA-Z0-9_]*','omitting both environment flags preserves its environment','Variables are sent in flag order',"'$$(NAME)'",'To redeploy to an existing Agent Runtime instance']
+          for phrase in phrases:
+              assert ''.join(phrase.split()) in text,phrase
+          table=next(t for t in soup.select('table') if 'OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT' in t.get_text())
+          assert len(table.select('tbody tr'))==4
+          (root/'rendered.json').write_text(json.dumps({'phrases':phrases,'defaults':4,'passed':True},indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: docs-${{ matrix.source }}
+          path: |
+            ${{ runner.temp }}/source.txt
+            ${{ runner.temp }}/build.log
+            ${{ runner.temp }}/rendered.json
