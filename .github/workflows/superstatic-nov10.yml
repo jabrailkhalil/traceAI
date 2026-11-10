@@ -1,0 +1,71 @@
+name: Verify Superstatic TypeScript port
+on:
+  push:
+    branches: [validation/superstatic-nov10]
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  CI: true
+  NO_COLOR: true
+jobs:
+  superstatic:
+    name: Superstatic Node${{ matrix.node }} ${{ matrix.source }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22', '24', '26']
+        source: [head]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.source == 'base' && 'firebase/superstatic' || 'jabrailkhalil/superstatic' }}
+          ref: ${{ matrix.source == 'base' && '1f9c60dc478049d4b728e9b96423de61f044310f' || '746e8155739c0560b3df974e6084eeacc7aed800' }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: |
+          git rev-parse HEAD | tee "$RUNNER_TEMP/source.txt"
+          node --version | tee -a "$RUNNER_TEMP/source.txt"
+          npm i --global npm@^11.7.0
+          npm ci
+      - name: Full build, lint and coverage suite
+        run: |
+          set -euo pipefail
+          npm run build 2>&1 | tee "$RUNNER_TEMP/build.log"
+          npm test 2>&1 | tee "$RUNNER_TEMP/tests.log"
+      - name: Restore main discovery behavior as negative control
+        if: matrix.source == 'head'
+        run: |
+          set -euo pipefail
+          cp src/loaders/config-file.ts "$RUNNER_TEMP/patched-config-file.ts"
+          restore() { cp "$RUNNER_TEMP/patched-config-file.ts" src/loaders/config-file.ts; }
+          trap restore EXIT
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('src/loaders/config-file.ts')
+          s=p.read_text()
+          anchor='autoConfig\n    ? CONFIG_FILE\n    : []'
+          assert s.count(anchor)==1
+          p.write_text(s.replace(anchor,'CONFIG_FILE'))
+          PY
+          set +e
+          npx --no-install mocha test/unit/loaders/config-file.spec.ts test/integration/config-loading.spec.ts --reporter json > "$RUNNER_TEMP/negative.json"
+          result=$?
+          set -e
+          test "$result" -eq 4
+          node -e 'const r=require(process.argv[1]);const a=require("assert");a.strictEqual(r.failures.length,4);a.ok(r.failures.every(f=>f.err.name==="AssertionError"));a.strictEqual(r.failures.filter(f=>f.fullTitle.includes("does not merge")).length,2);a.strictEqual(r.failures.filter(f=>f.fullTitle.includes("does not inherit")).length,2);' "$RUNNER_TEMP/negative.json"
+          restore
+          npx --no-install mocha test/unit/loaders/config-file.spec.ts test/integration/config-loading.spec.ts --reporter json > "$RUNNER_TEMP/restored.json"
+          git diff --exit-code HEAD -- src/loaders/config-file.ts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: superstatic-${{ matrix.source }}-node${{ matrix.node }}
+          path: |
+            ${{ runner.temp }}/source.txt
+            ${{ runner.temp }}/*.log
+            ${{ runner.temp }}/*.json
